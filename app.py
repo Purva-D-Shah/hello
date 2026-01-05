@@ -129,12 +129,13 @@ if check_password():
         with c2:
             misc_cost = st.number_input("💸 Miscellaneous Costs (₹ Total)", value=0.0, step=100.0)
         with c3:
+            # Smart Match Toggle
+            use_smart_match = st.checkbox("🧠 Smart Match SKUs", value=False, help="Ignores case and spaces when matching SKUs. (e.g. 'Blue Shirt' == 'blueshirt')")
+            
             # API Status Check
             client = get_openai_client()
             api_status = "✅ AI Connected" if client else "⚠️ AI Disconnected"
-            st.metric("🤖 AI Status", api_status)
-            if not client:
-                st.caption("Add `OPENAI_API_KEY` to Secrets to enable advanced insights.")
+            st.caption(f"🤖 AI Status: {api_status}")
 
     st.markdown("---")
 
@@ -154,7 +155,7 @@ if check_password():
         if st.button("🚀 Process Data and Generate Report", type="primary"):
             with st.spinner("Processing multiple files..."):
                 excel_data, stats, missing_details_df, logs = process_data(
-                    orders_files, payment_files, cost_file, packaging_cost, misc_cost
+                    orders_files, payment_files, cost_file, packaging_cost, misc_cost, smart_match=use_smart_match
                 )
             
             if excel_data:
