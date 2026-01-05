@@ -293,88 +293,130 @@ def process_data(orders_files, payment_files, cost_file, packaging_cost, misc_co
     else:
         df_cost = pd.DataFrame(columns=['SKU', 'Cost'])
 
-    # --- 4. Merge Logic ---
+    # --- 4. Merge Logic (Reference Implementation) ---
     if 'Sub Order No' not in df_orders.columns:
         return None, None, None, ["❌ Critical: 'Sub Order No' not found in orders."]
 
-    df_final = df_orders.copy()
-    df_final['Sub Order No'] = df_final['Sub Order No'].astype(str).str.strip()
-    
-    # Merge Payments
-    df_final = df_final.merge(df_same_pivot, on='Sub Order No', how='left')
-    df_final = df_final.merge(df_next_pivot, on='Sub Order No', how='left')
-    df_final['total_pay'] = df_final['same month pay'].fillna(0) + df_final['next month pay'].fillna(0)
-    
-    # Merge Status
-    df_final = df_final.merge(df_status, on='Sub Order No', how='left')
-    df_final.rename(columns={'Live Order Status': 'status'}, inplace=True)
-    df_final['status'] = df_final['status'].fillna('Unknown').astype(str).str.strip()
-    
-    # --- SKU MATCHING (Original/Strict Logic) ---
-    # Log available columns for debugging
-    logs.append(f"🔍 Cols in Orders Final: {list(df_final.columns)}")
-    logs.append(f"🔍 Cols in Cost File: {list(df_cost.columns)}")
-
-    has_sku_final = 'SKU' in df_final.columns
-    has_sku_cost = 'SKU' in df_cost.columns
-
-    if has_sku_final and has_sku_cost:
-        # Simple String Polish (Original Logic)
-        df_final['SKU'] = df_final['SKU'].astype(str).str.strip()
-        df_cost['SKU'] = df_cost['SKU'].astype(str).str.strip()
-        
-        # Create Map
-        # Drop duplicates in cost file
-        df_cost_dedup = df_cost.drop_duplicates(subset=['SKU'])
-        cost_map = df_cost_dedup.set_index('SKU')['Cost'].to_dict()
-        
-        # Map
-        df_final['Cost'] = df_final['SKU'].map(cost_map)
-        
+    # A. Prepare Base Orders
+    df_orders_final = df_orders.copy()
+    if 'Quantity' in df_orders_final.columns:
+        df_orders_final['Quantity'] = pd.to_numeric(df_orders_final['Quantity'], errors='coerce').fillna(0)
     else:
-        df_final['Cost'] = 0
-        logs.append(f"⚠️ MATCHING FAILED: SKU columns missing. Orders: {has_sku_final}, Cost: {has_sku_cost}")
+        df_orders_final['Quantity'] = 1
+        
+    df_orders_final['Sub Order No'] = df_orders_final['Sub Order No'].astype(str).str.strip()
+    
+    # B. Merge Payments
+    df_orders_final = df_orders_final.merge(df_same_pivot, on='Sub Order No', how='left')
+    df_orders_final = df_orders_final.merge(df_next_pivot, on='Sub Order No', how='left')
+    df_orders_final['total'] = df_orders_final['same month pay'].fillna(0) + df_orders_final['next month pay'].fillna(0)
 
-    # Logic
-    missing_skus = df_final[df_final['Cost'].isna()].copy()
-    df_final['Cost'] = df_final['Cost'].fillna(0)
+    # C. Merge Status
+    df_status['Sub Order No'] = df_status['Sub Order No'].astype(str).str.strip()
+    # Ensure uniqueness in status to prevent explosion
+    status_lookup = df_status.drop_duplicates(subset=['Sub Order No'], keep='last')
     
-    is_delivered = df_final['status'].isin(['Delivered', 'Exchange'])
-    is_packaging = df_final['status'].isin(['Delivered', 'Exchange', 'Return'])
+    df_orders_final = df_orders_final.merge(status_lookup, on='Sub Order No', how='left')
+    df_orders_final.rename(columns={'Live Order Status': 'status'}, inplace=True)
     
-    qty = df_final['Quantity'] if 'Quantity' in df_final.columns else 1
+    # D. COST LOGIC (Exact Reference Mirror)
+    # The reference code uses iloc[:, :2] assuming first col is SKU, second is Cost.
+    # We will try to respect that if our named search failed, or just use our named df if it worked.
     
-    df_final['product_cost_total'] = np.where(is_delivered, df_final['Cost'] * qty, 0)
-    df_final['packaging_cost_total'] = np.where(is_packaging, packaging_cost, 0)
+    # Create clean lookup (Copy reference logic: "cost_lookup.columns = ['SKU_Lookup', 'Cost_Value']")
+    if not df_cost.empty and 'SKU' in df_cost.columns and 'Cost' in df_cost.columns:
+        cost_lookup = df_cost[['SKU', 'Cost']].copy()
+    else:
+        # Fallback to iloc if names matched poorly
+        cost_lookup = df_cost.iloc[:, :2].copy()
+        
+    cost_lookup.columns = ['SKU_Lookup', 'Cost_Value']
     
-    total_payment = df_final['total_pay'].sum()
-    total_product_cost = df_final['product_cost_total'].sum()
-    total_packaging = df_final['packaging_cost_total'].sum()
-    profit = total_payment - total_product_cost - total_packaging - abs(same_ads_sum) - abs(next_ads_sum) - misc_cost
+    # String Conversion (Exact Reference)
+    df_orders_final['SKU'] = df_orders_final['SKU'].astype(str).str.strip()
+    cost_lookup['SKU_Lookup'] = cost_lookup['SKU_Lookup'].astype(str).str.strip()
+    
+    # Drop duplicates in lookup to prevent explode
+    cost_lookup = cost_lookup.drop_duplicates(subset=['SKU_Lookup'])
 
-    status_series = df_final['status']
+    # Merge
+    df_orders_final = pd.merge(df_orders_final, cost_lookup, left_on='SKU', right_on='SKU_Lookup', how='left')
+    
+    # ----------------------------------------------------
+    # IDENTIFY MISSING SKUS & PREPARE DETAILS
+    # ----------------------------------------------------
+    missing_cost_mask = df_orders_final['Cost_Value'].isna()
+    
+    # Create the Detail Dataframe for the Dashboard
+    cols_for_missing = ['Sub Order No', 'SKU', 'status', 'Quantity', 'total']
+    # ensure cols exist
+    curr_cols = [c for c in cols_for_missing if c in df_orders_final.columns]
+    
+    missing_details_df = df_orders_final.loc[missing_cost_mask, curr_cols].copy()
+    if 'total' in missing_details_df.columns:
+        missing_details_df.rename(columns={'total': 'Total Payment'}, inplace=True)
+
+    # Fill NaN with 0 temporarily for Calculation
+    df_orders_final['Cost_Value'] = df_orders_final['Cost_Value'].fillna(0)
+
+    # 1. Product Cost Calculation (Only for Delivered and Exchange)
+    # Ensure status column is clean
+    df_orders_final['status'] = df_orders_final['status'].fillna('Unknown').astype(str).str.strip()
+    condition_product = df_orders_final['status'].isin(['Delivered', 'Exchange'])
+
+    # Calculate numeric cost
+    df_orders_final['cost'] = np.where(condition_product, df_orders_final['Cost_Value'], 0)
+    df_orders_final['actual cost'] = df_orders_final['cost'] * df_orders_final['Quantity']
+    
+    # 2. Packaging Cost Calculation
+    condition_packaging = df_orders_final['status'].isin(['Delivered', 'Exchange', 'Return'])
+    df_orders_final['packaging cost'] = np.where(condition_packaging, packaging_cost, 0)
+    
+    if 'SKU_Lookup' in df_orders_final.columns:
+        df_orders_final.drop(columns=['SKU_Lookup', 'Cost_Value'], inplace=True)
+
+    # --- Calculate Final Stats ---
+    total_payment_sum = df_orders_final['total'].sum()
+    total_product_cost = df_orders_final['actual cost'].sum()
+    total_packaging = df_orders_final['packaging cost'].sum()
+    profit = total_payment_sum - total_product_cost - total_packaging - abs(same_ads_sum) - abs(next_ads_sum) - misc_cost
+
+    status_series = df_orders_final['status']
     stats = {
-        "Total Payments": total_payment,
+        "Total Payments": total_payment_sum,
         "Total Product Cost": total_product_cost,
         "Total Packaging Cost": total_packaging,
         "Ads Cost (Same Month)": same_ads_sum,
         "Ads Cost (Next Month)": next_ads_sum,
         "Miscellaneous Cost": misc_cost,
         "Profit / Loss": profit,
-        "Order Count": len(df_final),
-        "count_delivered": len(df_final[status_series == 'Delivered']),
-        "count_return": len(df_final[status_series == 'Return']),
-        "count_rto": len(df_final[status_series == 'RTO']),
-        "count_exchange": len(df_final[status_series == 'Exchange']),
-        "count_cancelled": len(df_final[status_series == 'Cancelled']),
-        "count_shipped": len(df_final[status_series == 'Shipped']),
-        "count_ready_to_ship": len(df_final[status_series == 'Ready_to_ship'])
+        "Order Count": len(df_orders_final),
+        "count_delivered": len(df_orders_final[status_series == 'Delivered']),
+        "count_return": len(df_orders_final[status_series == 'Return']),
+        "count_rto": len(df_orders_final[status_series == 'RTO']),
+        "count_exchange": len(df_orders_final[status_series == 'Exchange']),
+        "count_cancelled": len(df_orders_final[status_series == 'Cancelled']),
+        "count_shipped": len(df_orders_final[status_series == 'Shipped']),
+        "count_ready_to_ship": len(df_orders_final[status_series == 'Ready_to_ship'])
     }
+    
+    # EXPORT PREP: Replace 0 with "SKU Not Found" (Visual only)
+    # We create a display version for excel
+    df_export = df_orders_final.copy()
+    # We cast to object to allow string "SKU Not Found"
+    df_export['cost'] = df_export['cost'].astype(object)
+    df_export['actual cost'] = df_export['actual cost'].astype(object)
+    
+    # Re-evaluate condition for display
+    # Note: missing_cost_mask indices match df_export since it is a copy
+    condition_display_error = missing_cost_mask & condition_product
+    df_export.loc[condition_display_error, 'cost'] = "SKU Not Found"
+    df_export.loc[condition_display_error, 'actual cost'] = "SKU Not Found"
     
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_final.to_excel(writer, sheet_name='Result', index=False)
+        df_export.to_excel(writer, sheet_name='Result', index=False)
         pd.DataFrame([stats]).T.to_excel(writer, sheet_name='Overview')
     output.seek(0)
     
-    return output, stats, missing_skus, logs
+    return output, stats, missing_details_df, logs
