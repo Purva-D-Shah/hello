@@ -153,7 +153,7 @@ if check_password():
     if orders_files and cost_file and payment_files:
         if st.button("🚀 Process Data and Generate Report", type="primary"):
             with st.spinner("Processing multiple files..."):
-                excel_data, stats, missing_skus, logs = process_data(
+                excel_data, stats, missing_details_df, logs = process_data(
                     orders_files, payment_files, cost_file, packaging_cost, misc_cost
                 )
             
@@ -183,14 +183,17 @@ if check_password():
                 m4.metric("Ads (Same Month)", f"₹{stats['Ads Cost (Same Month)']:,.2f}")
                 
                 # --- Missing SKUs Alert ---
-                if not missing_skus.empty:
-                    st.markdown(f'<div class="error-box">⚠️ {len(missing_skus)} Orders Missing SKU Cost</div>', unsafe_allow_html=True)
+                if isinstance(missing_details_df, pd.DataFrame) and not missing_details_df.empty:
+                    st.markdown(f'<div class="error-box">⚠️ {len(missing_details_df)} Orders Missing SKU Cost</div>', unsafe_allow_html=True)
                     st.caption("The following orders have SKUs that were not found in your cost sheet. They are calculated as 0 cost.")
                     
                     st.dataframe(
-                        missing_skus[['Sub Order No', 'SKU', 'status', 'Quantity']],
+                        missing_details_df,
                         use_container_width=True,
-                        hide_index=True
+                        hide_index=True,
+                         column_config={
+                            "Total Payment": st.column_config.NumberColumn(format="₹%.2f")
+                        }
                     )
                 
                 # --- Order Status Breakdown ---
