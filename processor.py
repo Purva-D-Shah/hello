@@ -310,77 +310,30 @@ def process_data(orders_files, payment_files, cost_file, packaging_cost, misc_co
     df_final.rename(columns={'Live Order Status': 'status'}, inplace=True)
     df_final['status'] = df_final['status'].fillna('Unknown').astype(str).str.strip()
     
-    # --- SMART SKU MATCHING ---
-    def normalize_key(series):
-        # Enforce string, strip space, lowercase, remove all internal spaces
-        return series.astype(str).fillna('').str.lower().str.strip().str.replace(r'\s+', '', regex=True)
-
+    # --- SKU MATCHING (Original/Strict Logic) ---
     # Log available columns for debugging
     logs.append(f"🔍 Cols in Orders Final: {list(df_final.columns)}")
     logs.append(f"🔍 Cols in Cost File: {list(df_cost.columns)}")
 
-    # Check for SKU presence
     has_sku_final = 'SKU' in df_final.columns
     has_sku_cost = 'SKU' in df_cost.columns
-    has_pname_final = 'Product Name' in df_final.columns
-    has_pname_cost = 'Product Name' in df_cost.columns
-
-    # Cost fallback: check if we need to alias Product Name to SKU in cost file
-    if not has_sku_cost and has_pname_cost:
-        df_cost['SKU'] = df_cost['Product Name']
-        has_sku_cost = True
-        logs.append("ℹ️ Using 'Product Name' as 'SKU' in Cost File.")
 
     if has_sku_final and has_sku_cost:
-        # 1. Create Normalized Keys
-        df_final['sku_norm'] = normalize_key(df_final['SKU'])
-        df_cost['sku_norm'] = normalize_key(df_cost['SKU'])
+        # Simple String Polish (Original Logic)
+        df_final['SKU'] = df_final['SKU'].astype(str).str.strip()
+        df_cost['SKU'] = df_cost['SKU'].astype(str).str.strip()
         
-        # Debug: Show sample of keys
-        sample_sku = df_final['sku_norm'].head(3).tolist()
-        logs.append(f"🔍 Sample Final SKUs: {sample_sku}")
+        # Create Map
+        # Drop duplicates in cost file
+        df_cost_dedup = df_cost.drop_duplicates(subset=['SKU'])
+        cost_map = df_cost_dedup.set_index('SKU')['Cost'].to_dict()
         
-        # 2. Match
-        df_cost_dedup = df_cost.drop_duplicates(subset=['sku_norm'])
-        cost_map = df_cost_dedup.set_index('sku_norm')['Cost'].to_dict()
+        # Map
+        df_final['Cost'] = df_final['SKU'].map(cost_map)
         
-        # Apply Map
-        df_final['Cost'] = df_final['sku_norm'].map(cost_map)
-        
-        # 3. Fallback: Fuzzy SKUs (Extreme Measure)
-        # If Cost is still NaN, try to find "closest" SKU key in cost map
-        import difflib
-        
-        missing_mask = df_final['Cost'].isna()
-        if missing_mask.any():
-            unique_missing = df_final.loc[missing_mask, 'sku_norm'].dropna().unique()
-            cost_keys = list(cost_map.keys())
-            
-            fuzzy_map = {}
-            for bad_sku in unique_missing:
-                # Find closest match with cutoff 0.85 (very similar)
-                matches = difflib.get_close_matches(bad_sku, cost_keys, n=1, cutoff=0.85)
-                if matches:
-                    fuzzy_map[bad_sku] = cost_map[matches[0]]
-            
-            if fuzzy_map:
-                df_final.loc[missing_mask, 'Cost'] = df_final.loc[missing_mask, 'sku_norm'].map(fuzzy_map)
-                logs.append(f"ℹ️ Fuzzy Match rescued {len(fuzzy_map)} SKUs.")
-
-        # 4. Fallback Product Name
-        if df_final['Cost'].isna().any() and has_pname_final and has_pname_cost:
-             df_final['pname_norm'] = normalize_key(df_final['Product Name'])
-             df_cost['pname_norm'] = normalize_key(df_cost['Product Name'])
-             
-             df_cost_pname = df_cost.drop_duplicates(subset=['pname_norm'])
-             pname_map = df_cost_pname.set_index('pname_norm')['Cost'].to_dict()
-             
-             df_final['Cost'] = df_final['Cost'].fillna(df_final['pname_norm'].map(pname_map))
-             logs.append("ℹ️ Applied secondary matching using Product Name.")
-             
     else:
         df_final['Cost'] = 0
-        logs.append(f"⚠️ MATCHING FAILED: SKU/Product Name columns missing. Orders: {has_sku_final}, Cost: {has_sku_cost}")
+        logs.append(f"⚠️ MATCHING FAILED: SKU columns missing. Orders: {has_sku_final}, Cost: {has_sku_cost}")
 
     # Logic
     missing_skus = df_final[df_final['Cost'].isna()].copy()
