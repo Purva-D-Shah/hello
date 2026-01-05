@@ -19,9 +19,16 @@ def detect_file_month(file, df=None):
     2. Data (Date columns)
     Returns: (year, month) tuple or None
     """
-    # 1. Filename Search
+    # 1. Filename Search (Order matters: YYYY-MM is stronger than just 'jan')
     filename = file.name.lower()
-    # Simple regex for month names
+    
+    # Check for YYYY-MM pattern (e.g., 2025-09)
+    # matches 2020-2029 dash 01-12
+    ym_match = re.search(r'(202[0-9])[-_](0[1-9]|1[0-2])', filename)
+    if ym_match:
+        return (int(ym_match.group(1)), int(ym_match.group(2)))
+
+    # Check for Month names
     months = {
         'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
         'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
@@ -39,18 +46,26 @@ def detect_file_month(file, df=None):
 
     # 2. Data Search
     if df is not None:
-        # Look for any column with 'date' in name
+        # Look for 'Order Date' or similar
         date_cols = [c for c in df.columns if 'date' in str(c).lower()]
         if date_cols:
             col = date_cols[0]
             try:
                 # parser.parse might be slow for whole series, take sample
-                sample = df[col].dropna().head(10).astype(str)
-                dates = [parser.parse(d, fuzzy=True, dayfirst=True) for d in sample]
+                sample = df[col].dropna().head(50).astype(str) # Increased sample size
+                dates = []
+                for d in sample:
+                    try:
+                        dt = parser.parse(d, fuzzy=True, dayfirst=True)
+                        dates.append(dt)
+                    except:
+                        pass
+                
                 if dates:
                     # Most common month
                     path_counts = Counter([(d.year, d.month) for d in dates])
-                    return path_counts.most_common(1)[0][0]
+                    most_common = path_counts.most_common(1)[0][0]
+                    return most_common
             except:
                 pass
 
@@ -332,7 +347,27 @@ def process_data(orders_files, payment_files, cost_file, packaging_cost, misc_co
         # Apply Map
         df_final['Cost'] = df_final['sku_norm'].map(cost_map)
         
-        # 3. Fallback Product Name
+        # 3. Fallback: Fuzzy SKUs (Extreme Measure)
+        # If Cost is still NaN, try to find "closest" SKU key in cost map
+        import difflib
+        
+        missing_mask = df_final['Cost'].isna()
+        if missing_mask.any():
+            unique_missing = df_final.loc[missing_mask, 'sku_norm'].dropna().unique()
+            cost_keys = list(cost_map.keys())
+            
+            fuzzy_map = {}
+            for bad_sku in unique_missing:
+                # Find closest match with cutoff 0.85 (very similar)
+                matches = difflib.get_close_matches(bad_sku, cost_keys, n=1, cutoff=0.85)
+                if matches:
+                    fuzzy_map[bad_sku] = cost_map[matches[0]]
+            
+            if fuzzy_map:
+                df_final.loc[missing_mask, 'Cost'] = df_final.loc[missing_mask, 'sku_norm'].map(fuzzy_map)
+                logs.append(f"ℹ️ Fuzzy Match rescued {len(fuzzy_map)} SKUs.")
+
+        # 4. Fallback Product Name
         if df_final['Cost'].isna().any() and has_pname_final and has_pname_cost:
              df_final['pname_norm'] = normalize_key(df_final['Product Name'])
              df_cost['pname_norm'] = normalize_key(df_cost['Product Name'])
