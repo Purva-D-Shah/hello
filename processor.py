@@ -126,6 +126,9 @@ def smart_read_with_ai(file, expected_cols, description, sheet_name=None):
         if mapping:
             df.rename(columns=mapping, inplace=True)
             
+        # Deduplicate columns if any
+        df = df.loc[:, ~df.columns.duplicated()]
+            
         return df, "\n".join(log)
         
     except Exception as e:
@@ -232,7 +235,7 @@ def process_data(orders_files, payment_files, cost_file, packaging_cost, misc_co
 
     # Combine Payment Dataframes
     def aggregate_payments(dfs):
-        if not dfs: return pd.DataFrame(columns=['Sub Order No', 'Amount', 'Sub Order No', 'Live Order Status'])
+        if not dfs: return pd.DataFrame(columns=['Sub Order No', 'Amount', 'Live Order Status'])
         combined = pd.concat(dfs, ignore_index=True)
         
         # Normalize
